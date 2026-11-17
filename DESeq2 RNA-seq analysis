@@ -1,0 +1,224 @@
+# DESeq2 analysis of wheat root-tip RNA-seq data (D0-D4)
+# Basalt, Oakley and Basalt x Oakley F1; 80 samples.
+# Run the complete script in RStudio. Select the raw counts CSV first,
+# followed by the sample metadata CSV.
+# Results are saved in DESeq2_CLEAN_REANALYSIS beside the counts file.
+
+run_wheat_deseq2 <- function() {
+  if (!requireNamespace('DESeq2', quietly=TRUE)) {
+    stop('DESeq2 is not installed. In RStudio run: install.packages("BiocManager"); BiocManager::install("DESeq2")')
+  }
+  suppressPackageStartupMessages(library(DESeq2))
+  message('1/2: Choose TaNPF2_12_counts_3genotypes_80samples(3).csv')
+  count_path <- file.choose()
+  message('2/2: Choose TaNPF2_12_metadata_3genotypes_80samples(3).csv')
+  meta_path <- file.choose()
+  outdir <- file.path(dirname(count_path), 'DESeq2_CLEAN_REANALYSIS')
+  dir.create(outdir, recursive=TRUE, showWarnings=FALSE)
+  log_file <- file.path(outdir,'run_log.txt')
+  logmsg <- function(...) {
+    s <- paste(...,collapse='')
+    message(s)
+    cat(s, '\n', file=log_file, append=TRUE)
+  }
+  write.csv(data.frame(file=c('counts','metadata'),path=c(count_path,meta_path),
+                       md5=as.character(tools::md5sum(c(count_path,meta_path)))),
+            file.path(outdir,'00_input_manifest.csv'),row.names=FALSE)
+  logmsg('Reading raw counts and metadata...')
+  counts <- read.csv(count_path, row.names=1, check.names=FALSE,
+                     stringsAsFactors=FALSE)
+  md <- read.csv(meta_path, check.names=FALSE, stringsAsFactors=FALSE)
+  needed <- c('sample_id','genotype','treatment','day')
+  if (!all(needed %in% names(md))) stop('Missing metadata fields: ',
+                  paste(setdiff(needed,names(md)),collapse=', '))
+  if (anyDuplicated(rownames(counts))) stop('Duplicate gene identifiers in counts.')
+  if (anyDuplicated(colnames(counts))) stop('Duplicate sample IDs in counts.')
+  if (anyDuplicated(md$sample_id)) stop('Duplicate sample IDs in metadata.')
+  if (!setequal(colnames(counts),md$sample_id)) {
+    stop('Counts/metadata sample IDs do not match. Counts only: ',
+         paste(setdiff(colnames(counts),md$sample_id),collapse=', '),
+         '; metadata only: ',paste(setdiff(md$sample_id,colnames(counts)),collapse=', '))
+  }
+  md <- md[match(colnames(counts),md$sample_id),,drop=FALSE]
+  rownames(md) <- md$sample_id
+  if (anyNA(counts)) stop('Raw count matrix contains missing values.')
+  count_mat <- as.matrix(counts)
+  rm(counts)
+  if (!is.numeric(count_mat)) stop('Raw count matrix is not numeric.')
+  if (any(!is.finite(count_mat)) || any(count_mat<0) ||
+      any(abs(count_mat-round(count_mat))>1e-8)) {
+    stop('DESeq2 requires finite nonnegative INTEGER raw counts, not TPM/VST.')
+  }
+  storage.mode(count_mat) <- 'integer'
+  md$genotype <- trimws(md$genotype)
+  md$genotype[md$genotype %in% c('Basalt x Oakley','Basalt × Oakley','BO','F1','F₁','Basalt_x_Oakley')] <- 'F1'
+  md$N <- ifelse(md$treatment=='Low Nitrate','LN',
+                 ifelse(md$treatment=='High Nitrate','HN','PRE'))
+  if (!all(md$genotype %in% c('Basalt','Oakley','F1'))) stop('Unrecognized genotype label.')
+  if (!all(md$N %in% c('LN','HN','PRE'))) stop('Unrecognized treatment label.')
+  if (any(md$day==0 & md$N!='PRE') || any(md$day>0 & md$N=='PRE')) {
+    stop('Day 0 must be pre-treatment; Days 1-4 must be LN or HN.')
+  }
+  md$genotype <- factor(md$genotype,levels=c('Basalt','Oakley','F1'))
+  md$day <- as.integer(md$day)
+  if (!identical(colnames(count_mat),rownames(md))) stop('Sample order mismatch.')
+  write.csv(md,file.path(outdir,'00_metadata_used.csv'),row.names=FALSE)
+  sample_qc <- data.frame(sample_id=md$sample_id,genotype=md$genotype,
+                          day=md$day,N=md$N,library_size=colSums(count_mat),
+                          detected_genes=colSums(count_mat>0))
+  write.csv(sample_qc,file.path(outdir,'00_sample_library_QC.csv'),row.names=FALSE)
+  rep_counts <- as.data.frame(table(md$day,md$genotype,md$N))
+  names(rep_counts) <- c('day','genotype','N','n')
+  write.csv(rep_counts[rep_counts$n>0,],file.path(outdir,'00_group_replicate_counts.csv'),row.names=FALSE)
+  logmsg('Raw genes: ',nrow(count_mat),' | samples: ',ncol(count_mat))
+  logmsg('D0 = ',sum(md$day==0),'; D1 = ',sum(md$day==1),
+         '; D2 = ',sum(md$day==2),'; D3 = ',sum(md$day==3),
+         '; D4 = ',sum(md$day==4))
+
+  # Apply the same day-specific gene filter to pooled and separate models.
+  gene_filter <- function(m) rowSums(m>=10)>=3
+  as_table <- function(res) {
+    z <- as.data.frame(res)
+    z$gene_id <- rownames(z)
+    z <- z[,c('gene_id','baseMean','log2FoldChange','lfcSE','stat','pvalue','padj')]
+    z$direction <- ifelse(!is.na(z$padj) & z$padj<0.05 &
+                            !is.na(z$log2FoldChange) & z$log2FoldChange>=1,
+                          'LN_up', ifelse(!is.na(z$padj) & z$padj<0.05 &
+                            !is.na(z$log2FoldChange) & z$log2FoldChange<=-1,
+                            'LN_down','not_DEG'))
+    z
+  }
+  summarize <- function(z,day,genotype,model) {
+    data.frame(day=day,genotype=genotype,model=model,
+      genes_tested=nrow(z),padj_nonmissing=sum(!is.na(z$padj)),
+      LN_up=sum(z$direction=='LN_up'),LN_down=sum(z$direction=='LN_down'),
+      FDR_only=sum(!is.na(z$padj)&z$padj<0.05),
+      stringsAsFactors=FALSE)
+  }
+  summary_rows <- list(); interaction_rows <- list(); model_comp <- list()
+
+  # Compare genotypes at D0 before nitrogen treatment.
+  i0 <- which(md$day==0)
+  if (length(i0)>0) {
+    m0 <- count_mat[,i0,drop=FALSE]
+    keep0 <- gene_filter(m0)
+    d0 <- droplevels(md[i0,,drop=FALSE])
+    d0$genotype <- relevel(d0$genotype,'Basalt')
+    dds0 <- DESeqDataSetFromMatrix(m0[keep0,,drop=FALSE],d0,design=~genotype)
+    dds0 <- DESeq(dds0,quiet=TRUE)
+    for (pair in list(c('Oakley','Basalt'),c('F1','Basalt'),c('F1','Oakley'))) {
+      r <- results(dds0,contrast=c('genotype',pair),alpha=0.05)
+      z <- as_table(r)
+      write.csv(z,file.path(outdir,paste0('D0_',pair[1],'_vs_',pair[2],'.csv')),row.names=FALSE)
+    }
+    logmsg('Day 0 comparisons completed. Genes retained: ',sum(keep0))
+    rm(dds0)
+  }
+
+  for (daynum in 1:4) {
+    logmsg('Fitting Day ',daynum,'...')
+    ix <- which(md$day==daynum)
+    mm <- count_mat[,ix,drop=FALSE]
+    keep <- gene_filter(mm)
+    mm <- mm[keep,,drop=FALSE]
+    mdata <- md[ix,,drop=FALSE]
+    mdata$genotype <- factor(as.character(mdata$genotype),levels=c('Basalt','Oakley','F1'))
+    mdata$N <- factor(mdata$N,levels=c('HN','LN'))
+    if (any(table(mdata$genotype,mdata$N)<2)) {
+      stop('At least one Day ',daynum,' genotype/N group has <2 replicates.')
+    }
+    # Fit the genotype-by-nitrogen model for each day.
+    dds <- DESeqDataSetFromMatrix(mm,mdata,design=~genotype*N)
+    dds <- DESeq(dds,quiet=TRUE,minReplicatesForReplace=Inf)
+    coefnames <- resultsNames(dds)
+    logmsg('Day ',daynum,' model coefficients: ',paste(coefnames,collapse=', '))
+    writeLines(coefnames,file.path(outdir,paste0('D',daynum,'_model_coefficients.txt')))
+    get_int <- function(g) {
+      nm <- paste0('genotype',g,'.NLN')
+      if (!nm %in% coefnames) stop('Expected interaction coefficient missing: ',nm,
+                                  '. Found: ',paste(coefnames,collapse=', '))
+      nm
+    }
+    for (g in c('Basalt','Oakley','F1')) {
+      rr <- if (g=='Basalt') {
+        results(dds,contrast=c('N','LN','HN'),alpha=0.05)
+      } else {
+        results(dds,contrast=list(c('N_LN_vs_HN',get_int(g))),alpha=0.05)
+      }
+      zz <- as_table(rr)
+      write.csv(zz,file.path(outdir,paste0('D',daynum,'_',g,'_LN_vs_HN_POOLED.csv')),
+                row.names=FALSE)
+      summary_rows[[length(summary_rows)+1]] <- summarize(zz,daynum,g,'pooled_genotype_N')
+    }
+    for (g in c('Oakley','F1')) {
+      nm <- get_int(g)
+      zz <- as_table(results(dds,name=nm,alpha=0.05))
+      # Here log2FC is the *difference* between LN/HN effects of g and Basalt.
+      zz$direction <- NULL
+      write.csv(zz,file.path(outdir,paste0('D',daynum,'_interaction_',g,'_minus_Basalt.csv')),
+                row.names=FALSE)
+      interaction_rows[[length(interaction_rows)+1]] <- data.frame(
+        day=daynum,comparison=paste0(g,'_vs_Basalt_N_response'),
+        FDR_lt_005=sum(!is.na(zz$padj)&zz$padj<0.05),
+        FDR_and_abs_log2FC_ge1=sum(!is.na(zz$padj)&zz$padj<0.05&
+                                     !is.na(zz$log2FoldChange)&abs(zz$log2FoldChange)>=1))
+    }
+    # Fit each genotype separately using the same filtered genes for the day.
+    for (g in c('Basalt','Oakley','F1')) {
+      gi <- which(as.character(mdata$genotype)==g)
+      d_g <- droplevels(mdata[gi,,drop=FALSE])
+      d_g$N <- factor(as.character(d_g$N),levels=c('HN','LN'))
+      dg <- DESeqDataSetFromMatrix(mm[,gi,drop=FALSE],d_g,design=~N)
+      dg <- DESeq(dg,quiet=TRUE,minReplicatesForReplace=Inf)
+      zs <- as_table(results(dg,contrast=c('N','LN','HN'),alpha=0.05))
+      write.csv(zs,file.path(outdir,paste0('D',daynum,'_',g,'_LN_vs_HN_SEPARATE.csv')),
+                row.names=FALSE)
+      summary_rows[[length(summary_rows)+1]] <- summarize(zs,daynum,g,'separate_genotype')
+      pooled <- read.csv(file.path(outdir,paste0('D',daynum,'_',g,'_LN_vs_HN_POOLED.csv')),
+                         stringsAsFactors=FALSE)
+      both <- merge(pooled[,c('gene_id','log2FoldChange','padj')],
+                    zs[,c('gene_id','log2FoldChange','padj')],by='gene_id',
+                    suffixes=c('_pooled','_separate'))
+      model_comp[[length(model_comp)+1]] <- data.frame(day=daynum,genotype=g,
+        log2FC_Pearson=if (sum(complete.cases(both[,c('log2FoldChange_pooled','log2FoldChange_separate')]))>3)
+          cor(both$log2FoldChange_pooled,both$log2FoldChange_separate,use='complete.obs') else NA_real_,
+        FDR_pooled=sum(!is.na(both$padj_pooled)&both$padj_pooled<0.05),
+        FDR_separate=sum(!is.na(both$padj_separate)&both$padj_separate<0.05))
+      rm(dg)
+    }
+    logmsg('Day ',daynum,' complete; filtered genes: ',nrow(mm))
+    rm(dds,mm)
+    gc(verbose=FALSE)
+  }
+  write.csv(do.call(rbind,summary_rows),file.path(outdir,'01_DEG_counts_POOLED_vs_SEPARATE.csv'),
+            row.names=FALSE)
+  write.csv(do.call(rbind,interaction_rows),file.path(outdir,'02_genotype_N_interaction_summary.csv'),
+            row.names=FALSE)
+  write.csv(do.call(rbind,model_comp),file.path(outdir,'03_model_disagreement_diagnostics.csv'),
+            row.names=FALSE)
+
+  # Test whether genotype-by-nitrogen responses vary across D1-D4 using an LRT.
+  logmsg('Fitting global D1-D4 genotype x N x day LRT...')
+  ii <- which(md$day %in% 1:4)
+  m <- count_mat[,ii,drop=FALSE]
+  keep <- gene_filter(m)
+  dd <- md[ii,,drop=FALSE]
+  dd$genotype <- factor(as.character(dd$genotype),levels=c('Basalt','Oakley','F1'))
+  dd$N <- factor(dd$N,levels=c('HN','LN'))
+  dd$day <- factor(paste0('D',dd$day),levels=paste0('D',1:4))
+  global <- DESeqDataSetFromMatrix(m[keep,,drop=FALSE],dd,
+                                   design=~genotype*N*day)
+  global <- DESeq(global,test='LRT',
+                  reduced=~genotype+N+day+genotype:N+genotype:day+N:day,
+                  quiet=TRUE,minReplicatesForReplace=Inf)
+  gr <- as.data.frame(results(global,alpha=0.05))
+  gr$gene_id <- rownames(gr)
+  write.csv(gr,file.path(outdir,'04_GLOBAL_D1_D4_three_way_interaction_LRT.csv'),
+            row.names=FALSE)
+  logmsg('Global three-way interaction FDR<0.05: ',sum(!is.na(gr$padj)&gr$padj<0.05))
+  logmsg('Completed. Outputs: ',outdir)
+  capture.output(sessionInfo(),file=file.path(outdir,'05_R_session_info.txt'))
+  invisible(outdir)
+}
+
+run_wheat_deseq2()
