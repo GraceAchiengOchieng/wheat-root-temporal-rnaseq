@@ -1,0 +1,101 @@
+# Figure 1B: Root growth from D1 to D10
+# Repeated measurements of the same plants under HN and LN
+# Input: 09.05 Corrected_Root_Data_in_cm.xlsx
+# Outputs: model results, daily comparisons and summary tables
+# This script analyses the original measurements; it does not redraw Figure 1B.
+
+required <- c('readxl','dplyr','nlme','emmeans','tibble')
+missing <- required[!vapply(required, requireNamespace, logical(1), quietly=TRUE)]
+if(length(missing)) install.packages(missing, repos='https://cloud.r-project.org')
+suppressPackageStartupMessages({library(readxl);library(dplyr);library(nlme);library(emmeans)})
+
+# Load root-length measurements
+cat('Select the original D1-D10 root-length workbook...\n')
+input <- file.choose()
+dat <- as.data.frame(readxl::read_excel(input))
+required_cols <- c('genotype','reps','day','treatment','length_cm')
+if(!all(required_cols %in% names(dat))) stop('Wrong input file. Required columns: ', paste(required_cols, collapse=', '))
+
+dat <- dat |>
+  dplyr::filter(genotype %in% c('Basalt','Oakley','Basalt x Oakley'), treatment %in% c('LN','HN')) |>
+  dplyr::mutate(
+    Genotype=factor(dplyr::recode(as.character(genotype), 'Basalt x Oakley'='F1'), levels=c('Basalt','Oakley','F1')),
+    Nitrogen=factor(treatment,levels=c('HN','LN')),
+    Day=as.integer(day), DayFactor=factor(Day,levels=1:10),
+    Plant=factor(paste(Genotype,Nitrogen,reps,sep='_')),
+    Length=as.numeric(length_cm)
+  ) |>
+  dplyr::arrange(Plant,Day)
+if(anyNA(dat[,c('Genotype','Nitrogen','Day','Plant','Length')])) stop('Missing values in analysis columns')
+if(anyDuplicated(dat[,c('Plant','Day')])) stop('Duplicate plant-day measurements; check replicate identifiers')
+if(any(table(dat$Plant)!=10)) stop('Expected each plant to have 10 daily measurements; inspect data')
+
+out <- file.path(dirname(input),'Figure1B_RepeatedMeasures_Statistics')
+dir.create(out,showWarnings=FALSE,recursive=TRUE)
+write.csv(dat[,c('Genotype','Nitrogen','Day','Plant','Length')],file.path(out,'Data_analysed_no_mutant.csv'),row.names=FALSE)
+
+# Mixed model with plant as a random intercept and AR(1) within-plant correlation.
+# Day is treated as a factor. ML fits are used to compare the interaction models.
+ctrl <- nlme::lmeControl(opt='optim',maxIter=300,msMaxIter=300,returnObject=TRUE)
+fit_lme <- function(formula, method='ML', ar1=TRUE) {
+  nlme::lme(fixed=formula,random=~1|Plant,data=dat,method=method,
+            correlation=if(ar1) nlme::corAR1(form=~Day|Plant) else NULL,
+            control=ctrl, na.action=na.fail)
+}
+full_formula <- Length ~ Genotype * Nitrogen * DayFactor
+reduced_formula <- Length ~ Genotype*Nitrogen + Genotype*DayFactor + Nitrogen*DayFactor
+
+fit_pair <- tryCatch(list(full=fit_lme(full_formula), reduced=fit_lme(reduced_formula)),error=function(e) {
+  warning('AR(1) model failed; using random-intercept repeated-measures model. Reason: ',conditionMessage(e))
+  list(full=fit_lme(full_formula,ar1=FALSE), reduced=fit_lme(reduced_formula,ar1=FALSE))
+})
+full <- fit_pair$full
+interaction_test <- anova(fit_pair$reduced,full)
+write.csv(as.data.frame(interaction_test),file.path(out,'Three_way_interaction_ML_LRT.csv'))
+
+# Fixed-effect tests and model summaries
+model_anova <- as.data.frame(anova(full,type='marginal'))
+model_anova$Term <- rownames(model_anova)
+write.csv(model_anova,file.path(out,'Overall_fixed_effects.csv'),row.names=FALSE)
+capture.output(summary(full),file=file.path(out,'Model_summary.txt'))
+capture.output(interaction_test,file=file.path(out,'Three_way_interaction_test.txt'))
+
+# Genotype comparisons within each day and nitrogen treatment (Tukey-adjusted)
+emm <- emmeans::emmeans(full,~Genotype|Nitrogen*DayFactor)
+comparisons <- as.data.frame(summary(emmeans::contrast(emm,'pairwise',adjust='tukey'),infer=c(TRUE,TRUE)))
+comparisons$Day <- as.integer(as.character(comparisons$DayFactor))
+comparisons <- comparisons |>
+ dplyr::mutate(Significance=dplyr::case_when(p.value<.001~'***',p.value<.01~'**',p.value<.05~'*',TRUE~'ns')) |>
+ dplyr::arrange(Nitrogen,Day,contrast)
+write.csv(comparisons,file.path(out,'Supplementary_Table_S1_genotype_by_day_Tukey.csv'),row.names=FALSE)
+
+# HN versus LN within each genotype and day; Holm adjustment within day
+nt <- emmeans::emmeans(full,~Nitrogen|Genotype*DayFactor)
+nitrogen <- as.data.frame(summary(emmeans::contrast(nt,'pairwise',adjust='none'),infer=c(TRUE,TRUE)))
+nitrogen$Day <- as.integer(as.character(nitrogen$DayFactor))
+nitrogen <- nitrogen |>
+ dplyr::group_by(Day) |>
+ dplyr::mutate(p_holm=p.adjust(p.value,method='holm')) |>
+ dplyr::ungroup() |>
+ dplyr::arrange(Day,Genotype)
+write.csv(nitrogen,file.path(out,'Supplementary_Table_S2_HN_vs_LN_by_day_Holm.csv'),row.names=FALSE)
+
+# First day with a detected genotype difference under LN
+first_days <- comparisons |>
+ dplyr::filter(Nitrogen=='LN',contrast %in% c('Basalt - Oakley','Basalt - F1','Oakley - F1')) |>
+ dplyr::group_by(contrast) |>
+ dplyr::summarise(first_significant_day=if(any(p.value<.05)) min(Day[p.value<.05]) else NA_integer_,.groups='drop')
+write.csv(first_days,file.path(out,'First_significant_day_LN.csv'),row.names=FALSE)
+
+# Daily means and D4 comparisons
+means <- dat |>
+ dplyr::group_by(Nitrogen,Genotype,Day) |>
+ dplyr::summarise(n=dplyr::n(),mean_cm=mean(Length),sd_cm=sd(Length),se_cm=sd_cm/sqrt(n),.groups='drop')
+write.csv(means,file.path(out,'Daily_means_SE.csv'),row.names=FALSE)
+write.csv(dplyr::filter(comparisons,Nitrogen=='LN',Day==4),file.path(out,'D4_LN_genotype_comparisons.csv'),row.names=FALSE)
+
+cat('\nResults saved in:\n',out,'\n\n')
+cat('Three-way interaction test:\n');print(interaction_test)
+cat('\nFirst significant days under LN (Tukey adjusted):\n');print(first_days)
+cat('\nD4 comparisons under LN:\n');print(dplyr::filter(comparisons,Nitrogen=='LN',Day==4)[,c('contrast','estimate','p.value','Significance')])
+cat('\nThe first significant day indicates the first detected difference, not necessarily when it began.\n')
