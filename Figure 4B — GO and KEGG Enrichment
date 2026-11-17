@@ -1,0 +1,196 @@
+# Figure 4B: GO and KEGG enrichment of the shared LN-responsive genes
+# Selected terms are matched to the original ShinyGO results by pathway ID.
+# Inputs: GO and KEGG enrichment CSV files (select in either order)
+# Outputs: vector PDF, 600 dpi PNG/TIFF and a table of plotted values
+# Run in RStudio using source(file.choose(), echo = FALSE).
+
+make_enrichment_figure_B <- function() {
+  message("\nChoose GO enrichment CSV (19 rows), then KEGG enrichment CSV (20 rows).")
+  paths <- c(file.choose(), file.choose())
+  read_input <- function(path) {
+    x <- read.csv(path, check.names = FALSE, stringsAsFactors = FALSE)
+    needed <- c("Pathway", "Enrichment FDR", "nGenes")
+    if (length(setdiff(needed, names(x))) > 0L) {
+      stop(paste("Not a ShinyGO enrichment CSV:", basename(path)), call. = FALSE)
+    }
+    x
+  }
+  a <- read_input(paths[1]); b <- read_input(paths[2])
+  is_go <- function(x) all(grepl("^GO:", x$Pathway))
+  is_kegg <- function(x) all(grepl("^Path:taes", x$Pathway))
+  if (is_go(a) && is_kegg(b)) {
+    go <- a; ke <- b
+  } else if (is_go(b) && is_kegg(a)) {
+    go <- b; ke <- a
+  } else {
+    stop("Select one GO and one KEGG enrichment CSV (any order).", call. = FALSE)
+  }
+
+  # The 17 terms used in the figure, matched by GO or KEGG identifier.
+  spec <- data.frame(
+    db = c(rep("GO",3), "KEGG", rep("GO",2),rep("KEGG",2),
+           rep("GO",3),rep("KEGG",6)),
+    id = c("GO:0006412", "GO:0042254", "GO:0042255", "taes04141",
+           "GO:0045333", "GO:0046034", "taes00190", "taes00020",
+           "GO:0006091", "GO:0006753", "GO:0009150",
+           "taes00010", "taes00620", "taes01200", "taes00030",
+           "taes01250", "taes00061"),
+    term = c(
+      "Translation", "Ribosome biogenesis", "Ribosome assembly",
+      "Protein processing in endoplasmic reticulum",
+      "Cellular respiration", "ATP metabolic process",
+      "Oxidative phosphorylation", "Citrate cycle (TCA cycle)",
+      "Generation of precursor metabolites and energy",
+      "Nucleoside phosphate metabolic process",
+      "Purine ribonucleotide metabolic process",
+      "Glycolysis-Gluconeogenesis", "Pyruvate metabolism",
+      "Carbon metabolism", "Pentose phosphate pathway",
+      "Biosynthesis of nucleotide sugars", "Fatty acid biosynthesis"
+    ),
+    group = c(rep(1L,4), rep(2L,4),rep(3L,9)),
+    stringsAsFactors = FALSE
+  )
+  stopifnot(nrow(spec) == 17L)
+  go$id <- sub(" .*", "", go$Pathway)
+  ke$id <- sub(" .*", "", ke$Pathway)
+  ke$id <- sub("^Path:", "", ke$id)
+  go$db <- "GO"; ke$db <- "KEGG"
+  all_terms <- rbind(go[, c("db", "id", "Enrichment FDR", "nGenes", "Pathway")],
+                     ke[, c("db", "id", "Enrichment FDR", "nGenes", "Pathway")])
+  k <- match(paste(spec$db, spec$id), paste(all_terms$db, all_terms$id))
+  if (anyNA(k)) {
+    stop(paste("Missing expected enrichment IDs:",
+               paste(spec$id[is.na(k)], collapse = ", ")), call. = FALSE)
+  }
+  d <- cbind(spec, all_terms[k, c("Enrichment FDR", "nGenes", "Pathway")])
+  names(d)[names(d) == "Enrichment FDR"] <- "FDR"
+  d$FDR <- as.numeric(d$FDR)
+  d$nGenes <- as.numeric(d$nGenes)
+  if (any(!is.finite(d$FDR) | d$FDR <= 0 | d$FDR >= 1) ||
+      any(!is.finite(d$nGenes) | d$nGenes <= 0)) {
+    stop("Invalid FDR or nGenes values in source enrichment CSVs.", call. = FALSE)
+  }
+  d$minus_log10_FDR <- -log10(d$FDR)
+  d$y <- 9.84 - (seq_len(nrow(d)) - 1) * 0.491
+
+  # Colour indicates -log10(FDR), using the original figure palette.
+  palette_fun <- grDevices::colorRampPalette(
+    c("#1241B1", "#00A3D9", "#00CB94", "#F8E448", "#FB8B21", "#C90032")
+  )
+  palette <- palette_fun(256L)
+  max_score <- 160
+  fill_for <- function(score) {
+    z <- pmin(max_score, pmax(0, score))
+    palette[1L + floor(z / max_score * 255L)]
+  }
+  # Pseudo-log x-axis spacing; the source FDR values are not changed.
+  map_x <- function(v) 8.75 + log2(1 + v) / log2(186) * 5.54
+  axis_breaks <- c(0,2,5,10,20,40,80,160)
+  panel_left <- map_x(0)
+  panel_right <- map_x(185)
+  panel_bottom <- 1.64
+  panel_top <- 10.10
+  ink <- "#20252A"
+  grid_col <- "#FFFFFF"
+
+  draw <- function() {
+    op <- par(no.readonly = TRUE)
+    on.exit(par(op), add = TRUE)
+    par(mar = c(0,0,0,0), xaxs = "i", yaxs = "i", family = "sans")
+    plot.new()
+    plot.window(xlim = c(0, 18.7), ylim = c(0, 11.0))
+    rect(0,0,18.7,11,col="white",border=NA)
+    text(.34, 10.55, "B", cex=1, font=2, adj=c(0,.5), col=ink)
+    rect(panel_left,panel_bottom,panel_right,panel_top,col="#E8E8E8",border=NA)
+    for (br in axis_breaks) {
+      xx <- map_x(br)
+      segments(xx,panel_bottom,xx,panel_top,col=grid_col,lwd=1.05)
+      text(xx,1.36,br,cex=1, col=ink)
+    }
+    for (yy in d$y) {
+      segments(panel_left,yy,panel_right,yy,col=grid_col,lwd=1.05)
+    }
+    for (i in seq_len(nrow(d))) {
+      text(8.52,d$y[i],d$term[i],adj=c(1,.5),cex=1,col=ink)
+      # Bubble area represents the number of contributing genes.
+      pt_cex <- 0.95 + sqrt(d$nGenes[i] / 300) * 1.75
+      points(map_x(d$minus_log10_FDR[i]),d$y[i],
+             pch=if(d$db[i]=="GO") 21 else 23,
+             bg=fill_for(d$minus_log10_FDR[i]),
+             col="#6A6670",lwd=.65,cex=pt_cex)
+    }
+    # Brackets for the three functional groups.
+    groups <- list(1:4,5:8,9:17)
+    group_text <- c("Protein synthesis\nand processing",
+                    "Respiration and\nenergy metabolism",
+                    "Carbon and\nnucleotide metabolism")
+    for (g in seq_along(groups)) {
+      v <- d$y[groups[[g]]]
+      hi <- max(v)+.21
+      lo <- min(v)-.21
+      segments(3.26,lo,3.26,hi,col=ink,lwd=.8)
+      segments(3.26,hi,3.49,hi,col=ink,lwd=.8)
+      segments(3.26,lo,3.49,lo,col=ink,lwd=.8)
+      text(2.98,mean(range(v)),group_text[g],adj=c(1,.5),
+           cex=1,font=2,col=ink)
+    }
+    text((panel_left+panel_right)/2,.82,expression(-log[10]*"(FDR)"),cex=1,font=2,col=ink)
+
+    # Database, gene-count and FDR legends.
+    lx <- 15.23
+    text(lx,9.95,"Database",adj=c(0,.5),cex=1,font=2,col=ink)
+    points(lx+.28,9.56,pch=21,bg="#666666",col="#666666",cex=1.18)
+    text(lx+.70,9.56,"GO",adj=c(0,.5),cex=1,col=ink)
+    points(lx+.28,9.14,pch=23,bg="#666666",col="#666666",cex=1.18)
+    text(lx+.70,9.14,"KEGG",adj=c(0,.5),cex=1,col=ink)
+
+    text(lx,8.58,"Gene count",adj=c(0,.5),cex=1,font=2,col=ink)
+    leg_n <- c(10,25,50,100,200,300)
+    for (j in seq_along(leg_n)) {
+      y <- 8.13 - (j-1)*.40
+      points(lx+.28,y,pch=21,bg="#666666",col="#666666",
+             cex=.95+sqrt(leg_n[j]/300)*1.75)
+      text(lx+1.01,y,as.character(leg_n[j]),cex=1,adj=c(0,.5),col=ink)
+    }
+
+    text(lx,5.42,expression(-log[10]*"(FDR)"),adj=c(0,.5),cex=1,font=2,col=ink)
+    color_bar_y0 <- 3.29
+    color_bar_y1 <- 5.04
+    for (j in 0:255) {
+      y0 <- color_bar_y0+(color_bar_y1-color_bar_y0)*j/256
+      y1 <- color_bar_y0+(color_bar_y1-color_bar_y0)*(j+1)/256
+      rect(lx+.15,y0,lx+.55,y1,col=palette[j+1],border=NA)
+    }
+    for (v in c(0,20,40,80,160)) {
+      yy <- color_bar_y0 + (color_bar_y1-color_bar_y0)*v/160
+      segments(lx+.55,yy,lx+.68,yy,col=ink,lwd=.7)
+      text(lx+.86,yy,as.character(v),adj=c(0,.5),cex=1,col=ink)
+    }
+  }
+
+  # Save the figure and the exact values plotted.
+  out <- dirname(normalizePath(paths[2],winslash="/",mustWork=TRUE))
+  pdf_file <- file.path(out,"Figure_1B_GO_KEGG_POLISHED.pdf")
+  png_file <- file.path(out,"Figure_1B_GO_KEGG_POLISHED_600dpi.png")
+  tif_file <- file.path(out,"Figure_1B_GO_KEGG_POLISHED_600dpi.tiff")
+  audit_file <- file.path(out,"Figure_1B_GO_KEGG_POLISHED_17_terms_source_values.csv")
+  write.csv(d[,c("db","id","term","group","FDR","nGenes","minus_log10_FDR","Pathway")],
+            audit_file,row.names=FALSE)
+  grDevices::pdf(pdf_file,width=18.7,height=11,pointsize=14,
+                 onefile=FALSE,useDingbats=FALSE)
+  tryCatch(draw(),finally=grDevices::dev.off())
+  grDevices::png(png_file,width=18.7,height=11,units="in",res=600,
+                 pointsize=14,bg="white")
+  tryCatch(draw(),finally=grDevices::dev.off())
+  grDevices::tiff(tif_file,width=18.7,height=11,units="in",res=600,
+                  pointsize=14,compression="lzw",bg="white")
+  tryCatch(draw(),finally=grDevices::dev.off())
+  message("\nSUCCESS. Figure B saved to: ",out,
+          "\nPDF: ",basename(pdf_file),
+          "\nPNG: ",basename(png_file),
+          "\nTIFF: ",basename(tif_file),
+          "\nAudit: ",basename(audit_file))
+  invisible(d)
+}
+
+make_enrichment_figure_B()
