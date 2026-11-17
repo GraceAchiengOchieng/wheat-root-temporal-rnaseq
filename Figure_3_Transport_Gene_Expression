@@ -1,0 +1,186 @@
+# Transport-associated gene expression heatmap
+# Basalt, Oakley and F₁ | D0–D4
+# 29 selected genes in four transport-related categories
+# Input: Transport_29genes_CONDENSED_D0_D4.csv (435 rows)
+# Output: vector PDF, 600 dpi PNG and TIFF, saved beside the input file
+# Base R only. Select the input CSV when prompted.
+
+options(stringsAsFactors = FALSE)
+
+# Read the input file
+input_file <- file.choose()
+d <- read.csv(input_file, check.names = FALSE, fileEncoding = "UTF-8")
+required <- c("gene_id", "category", "genotype", "day", "within_gene_z",
+              "mean_vst", "log2FC_LN_HN", "padj", "LN_up")
+missing <- setdiff(required, names(d))
+if (length(missing)) stop("Missing columns: ", paste(missing, collapse = ", "))
+if (nrow(d) != 435L || length(unique(d$gene_id)) != 29L)
+  stop("Expected exactly 435 rows: 29 genes x 3 genotypes x 5 days.")
+
+# Keep the category and gene order from the input file
+categories <- c("Nitrogen/peptide transport", "Nutrient and solute transport",
+                "Peptide transport", "Amino-acid/amine transport")
+category_labels <- c("Nitrogen/peptide\ntransport",
+                     "Nutrient and\nsolute transport",
+                     "Peptide\ntransport",
+                     "Amino-acid/amine\ntransport")
+expected_counts <- c(7L, 12L, 2L, 8L)
+genes <- unique(d$gene_id)
+assigned_categories <- d$category[match(genes, d$gene_id)]
+if (!identical(as.integer(table(factor(assigned_categories, levels = categories))),
+               expected_counts)) stop("Gene categories/counts do not match 7/12/2/8.")
+if (!identical(as.character(rle(assigned_categories)$values), categories))
+  stop("Gene categories must be contiguous and ordered as in the condensed CSV.")
+
+G <- c("Basalt", "Oakley", "F\u2081")
+D <- paste0("D", 0:4)
+if (!setequal(unique(d$genotype), G)) stop("Expected genotypes: Basalt, Oakley, F₁.")
+if (!setequal(unique(d$day), D)) stop("Expected days D0, D1, D2, D3, D4.")
+if (anyDuplicated(d[c("gene_id", "genotype", "day")]))
+  stop("Duplicate gene x genotype x day rows found.")
+
+# Assemble the expression and significance matrices
+Z <- matrix(NA_real_, nrow = 29L, ncol = 15L,
+            dimnames = list(genes, as.vector(outer(G, D, paste, sep = "_"))))
+SIG <- matrix(FALSE, nrow = 29L, ncol = 15L)
+for (i in seq_along(genes)) {
+  for (g in seq_along(G)) {
+    for (t in seq_along(D)) {
+      row <- which(d$gene_id == genes[i] & d$genotype == G[g] & d$day == D[t])
+      if (length(row) != 1L) stop("Missing/nonunique data for ", genes[i], ", ", G[g], ", ", D[t])
+      col <- (g - 1L) * 5L + t
+      Z[i, col] <- d$within_gene_z[row]
+      # Mark LN-upregulated genes using the stated DESeq2 cutoffs
+      SIG[i, col] <- t > 1L && !is.na(d$padj[row]) && !is.na(d$log2FC_LN_HN[row]) &&
+        d$padj[row] < 0.05 && d$log2FC_LN_HN[row] > 1
+    }
+  }
+}
+if (anyNA(Z)) stop("Some VST values are missing; cannot plot complete heatmap.")
+if (sum(SIG) != 68L)
+  stop("Unexpected significant-cell count (expected 68; got ", sum(SIG), ").")
+
+# Z contains within-gene standardized values across all 15 genotype/day means.
+# Limit the display scale to -2 to +2 without changing the underlying values.
+cols <- grDevices::colorRampPalette(c("#20557A", "#C8D9E1", "#F8F8F5",
+                                        "#E9B99A", "#BA623F"))(257)
+cell_color <- function(value) {
+  value <- pmax(-2, pmin(2, value))
+  cols[pmax(1L, pmin(257L, as.integer(round((value + 2) / 4 * 256)) + 1L))]
+}
+
+# Draw the heatmap and annotations
+make_figure <- function() {
+  old <- par(no.readonly = TRUE)
+  on.exit(par(old))
+  par(mar = c(0, 0, 0, 0), oma = c(0, 0, 0, 0),
+      xaxs = "i", yaxs = "i", xpd = NA, family = "sans", cex = 1,
+      fg = "#344653")
+  plot.new()
+  plot.window(xlim = c(-8.7, 15.25), ylim = c(-3.85, 32.4), asp = NA)
+
+  # Expression values and significance markers
+  for (i in seq_len(29)) {
+    y <- 29.5 - i
+    for (j in seq_len(15)) {
+      x <- j - 0.5
+      rect(x - .5, y - .49, x + .5, y + .49,
+           col = cell_color(Z[i, j]), border = "#FFFFFF", lwd = .40)
+      if (SIG[i, j]) points(x, y, pch = 16, cex = .74, col = "#171F23")
+    }
+    text(-.44, y, genes[i], adj = 1, cex = 1.00, col = "#26353F",
+         font = 1)
+  }
+
+  # D0 is the untreated baseline; no LN/HN contrast is shown for D0
+  for (start in c(0, 5, 10))
+    rect(start + .015, .01, start + .985, 29.0,
+         border = "#7F919B", lwd = .75)
+  segments(5, 0, 5, 29, lwd = 1.7, col = "#40535C")
+  segments(10, 0, 10, 29, lwd = 1.7, col = "#40535C")
+
+  # Separate the four functional categories
+  groups <- list(1:7, 8:19, 20:21, 22:29)
+  for (k in seq_along(groups)) {
+    ids <- groups[[k]]
+    upper <- 30 - min(ids)
+    lower <- 29 - max(ids)
+    if (k > 1) segments(0, upper, 15, upper, lwd = 1.15, col = "#52636B")
+    bx <- -4.75
+    segments(bx, lower + .12, bx, upper - .12, col = "#5D737E", lwd = 1.15)
+    segments(bx, upper - .12, bx + .42, upper - .12, col = "#5D737E", lwd = 1.15)
+    segments(bx, lower + .12, bx + .42, lower + .12, col = "#5D737E", lwd = 1.15)
+    text(bx - .28, (lower + upper) / 2, category_labels[k], adj = 1,
+         cex = 1.00, font = 2, col = "#304653", lines = 1.13)
+  }
+
+  # Genotype headings and sampling days
+  for (g in seq_along(G)) {
+    start <- (g - 1) * 5
+    text(start + 2.5, 31.35, if (g == 3L) expression(bold(F)[1]) else G[g], font = 2, cex = 1.12,
+         col = "#263C48")
+    for (t in seq_along(D))
+      text(start + t - .5, 30.0, D[t], cex = 1.00, col = "#344653")
+  }
+
+  # Significance key and expression colour scale
+  points(.26, -.92, pch = 16, cex = .95, col = "#171F23")
+  text(.65, -.92,
+       "Significantly LN-up vs HN (log2FC > 1; adjusted P < 0.05)",
+       adj = 0, cex = 1.00, col = "#344653")
+
+  grad_x <- seq(9.2, 14.94, length.out = 258)
+  for (k in 1:257)
+    rect(grad_x[k], -2.18, grad_x[k + 1], -1.63,
+         border = NA, col = cols[k])
+  text(mean(range(grad_x)), -1.41, "Within-gene standardized VST",
+       cex = 1.00, font = 1, col = "#344653")
+  text(grad_x[1], -2.40, "-2", adj = c(.5, 1), cex = 1.00)
+  text(mean(range(grad_x)), -2.40, "0", adj = c(.5, 1), cex = 1.00)
+  text(tail(grad_x, 1), -2.40, "+2", adj = c(.5, 1), cex = 1.00)
+}
+
+# Export all formats to the input folder
+output_dir <- dirname(normalizePath(input_file, winslash = "/"))
+pdf_path <- file.path(output_dir, "Figure2_Transport_29genes_JOURNAL_VECTOR.pdf")
+png_path <- file.path(output_dir, "Figure2_Transport_29genes_JOURNAL_600dpi.png")
+tiff_path <- file.path(output_dir, "Figure2_Transport_29genes_JOURNAL_600dpi.tiff")
+
+# PDF: preserve text and graphics as vectors
+if (capabilities("cairo")) {
+  grDevices::cairo_pdf(pdf_path, width = 16.8, height = 12.5,
+                       pointsize = 14, family = "sans", onefile = FALSE)
+} else {
+  grDevices::pdf(pdf_path, width = 16.8, height = 12.5,
+                 pointsize = 14, family = "sans", useDingbats = FALSE)
+}
+make_figure()
+grDevices::dev.off()
+
+# PNG: 600 dpi
+if (capabilities("cairo")) {
+  grDevices::png(png_path, width = 16.8, height = 12.5,
+                 units = "in", res = 600, type = "cairo", pointsize = 14,
+                 bg = "white")
+} else {
+  grDevices::png(png_path, width = 16.8, height = 12.5,
+                 units = "in", res = 600, pointsize = 14, bg = "white")
+}
+make_figure()
+grDevices::dev.off()
+
+# TIFF: 600 dpi with LZW compression
+if (capabilities("cairo")) {
+  grDevices::tiff(tiff_path, width = 16.8, height = 12.5,
+                 units = "in", res = 600, type = "cairo", pointsize = 14,
+                 compression = "lzw", bg = "white")
+} else {
+  grDevices::tiff(tiff_path, width = 16.8, height = 12.5,
+                 units = "in", res = 600, pointsize = 14,
+                 compression = "lzw", bg = "white")
+}
+make_figure()
+grDevices::dev.off()
+
+message("Finished: ", pdf_path, "\n", png_path, "\n", tiff_path,
+        "\n29 genes, 435 expression cells, ", sum(SIG), " significant LN-up cells.")
