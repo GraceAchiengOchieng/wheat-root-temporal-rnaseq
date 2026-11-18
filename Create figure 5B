@@ -1,0 +1,127 @@
+# Figure 5B | Selected genes from the temporal Signature B analysis
+# Input: Figure_2B_FINAL_21_genes_font14_ALIGNED_values_and_significance.csv
+# All 21 gene IDs, annotations, category labels, temporal classes and
+# D1-D4 log2FC values are read directly from the source table.
+# Contrasts are Oakley - Basalt and F1 - Basalt under low nitrogen.
+# White-to-red colours display log2FC 0-11, matching the reference.
+# This is a descriptive heatmap; no significance is inferred from colour.
+
+run_figure_5B <- function() {
+  cat("Choose Figure_2B_FINAL_21_genes_font14_ALIGNED_values_and_significance.csv\n")
+  p <- file.choose()
+  d <- read.csv(p,check.names=FALSE,stringsAsFactors=FALSE)
+  required <- c("figure_row_order","gene_id","functional_category_display",
+                "annotation_display","temporal_class_display")
+  for (day in 1:4) for (g in c("O","F1")) {
+    required <- c(required,paste0("D",day,"_",g,"_B_log2FC"))
+  }
+  if (length(setdiff(required,names(d)))) stop("Missing fields: ",
+       paste(setdiff(required,names(d)),collapse=", "))
+  d <- d[order(d$figure_row_order),,drop=FALSE]
+  if(nrow(d)!=21 || anyDuplicated(d$gene_id)) stop("Expected 21 unique selected genes.")
+  if (!identical(as.integer(d$figure_row_order),1:21))
+    stop("Source row order must be 1 through 21.")
+  out <- file.path(dirname(p),"Figure_5B_Selected_Gene_Heatmap")
+  dir.create(out,showWarnings=FALSE,recursive=TRUE)
+  write.csv(d,file.path(out,"Figure_5B_exact_source_values.csv"),row.names=FALSE)
+
+  # Normalized page coordinates; all row/column positions are fixed.
+  draw <- function() {
+    grid::grid.newpage()
+    gp <- grid::gpar
+    txt <- function(label,x,y,size=10,font=1,just="left",col="#213248",rot=0) {
+      grid::grid.text(label,x=grid::unit(x,"npc"),y=grid::unit(y,"npc"),
+        just=just,rot=rot,gp=gp(fontsize=size,fontface=font,col=col,fontfamily="sans"))
+    }
+    rect <- function(x,y,w,h,fill,border=NA,lwd=.4) {
+      grid::grid.rect(x=grid::unit(x,"npc"),y=grid::unit(y,"npc"),
+        width=grid::unit(w,"npc"),height=grid::unit(h,"npc"),
+        gp=gp(fill=fill,col=border,lwd=lwd))
+    }
+    line <- function(x0,y0,x1,y1,col="#CFD4D9",lwd=.7) {
+      grid::grid.lines(x=grid::unit(c(x0,x1),"npc"),
+        y=grid::unit(c(y0,y1),"npc"),gp=gp(col=col,lwd=lwd))
+    }
+    txt("B",.026,.973,size=15,font=2)
+    # Columns are deliberately spaced to reproduce the original table layout.
+    xcat=.028; xgene=.18; xann=.37; xclass=.612
+    ox=.666; fx=.814; cw=.0285; gap=.0023
+    yhead=.935; ytop=.825; rowh=.0307
+    txt("Functional category",xcat,yhead,size=11,font=2)
+    txt("Gene ID",xgene,yhead,size=11,font=2)
+    txt("Annotation",xann,yhead,size=11,font=2)
+    txt("Temporal\nclass",.610,yhead,size=10.5,font=2)
+    txt("(Oakley - Basalt)",ox+1.5*(cw+gap),.957,size=11,just="center")
+    txt("(F\u2081 - Basalt)",fx+1.5*(cw+gap),.957,size=11,just="center")
+    for (k in 0:3) {
+      txt(paste0("D",k+1),ox+k*(cw+gap),.906,size=10,just="center")
+      txt(paste0("D",k+1),fx+k*(cw+gap),.906,size=10,just="center")
+    }
+    line(.026,.878,.977,.878)
+    class_cols <- c("Early persistent (D1-D4)"="#7B5BA4",
+                    "Intermediate persistent (D2-D4)"="#3E8BB3",
+                    "Day 4 emerging (D4)"="#D18A4C")
+    # Continuous white-to-red palette with hard limits at 0 and 11.
+    pal <- grDevices::colorRampPalette(c("#FFFFFF","#F5D9C3","#ECA077",
+                                          "#CF5B46","#9B2236","#6D0F2D"))(256)
+    colfor <- function(v) {
+      if(!is.finite(v)) return("#E1E3E5")
+      pal[1L+floor(pmin(11,pmax(0,v))/11*255)]
+    }
+    for (i in seq_len(nrow(d))) {
+      y <- ytop-(i-1)*rowh
+      if (i%%2==0) rect(.178,y,.79,rowh,fill="#F7F8F9")
+      txt(d$gene_id[i],xgene,y,size=9.1)
+      txt(d$annotation_display[i],xann,y,size=9.1)
+      cls <- d$temporal_class_display[i]
+      if (!cls %in% names(class_cols)) stop("Unexpected class for heatmap: ",cls)
+      rect(.631,y,.012,rowh*.78,fill=class_cols[[cls]])
+      for (k in 1:4) {
+        v <- as.numeric(d[[paste0("D",k,"_O_B_log2FC")]][i])
+        rect(ox+(k-1)*(cw+gap),y,cw,rowh*.83,colfor(v))
+        v <- as.numeric(d[[paste0("D",k,"_F1_B_log2FC")]][i])
+        rect(fx+(k-1)*(cw+gap),y,cw,rowh*.83,colfor(v))
+      }
+    }
+    cats <- unique(d$functional_category_display)
+    for (cat in cats) {
+      ids <- which(d$functional_category_display==cat)
+      yc <- ytop-(mean(range(ids))-1)*rowh
+      txt(gsub(" & "," &\n",cat,fixed=TRUE),xcat,yc,size=10.5,font=2)
+      if(min(ids)>1) {
+        ysep <- ytop-(min(ids)-1.5)*rowh
+        line(.026,ysep,.977,ysep)
+      }
+    }
+    line(.796,ytop+rowh*.6,.844,ytop-20*rowh-rowh*.6,col="#BCC4CC",lwd=1.1)
+
+    # Colour scale placed in the right margin of the figure.
+    txt("log\u2082FC",.964,.746,size=10,just="center")
+    txt("Under LN",.964,.722,size=9.4,just="center")
+    for (k in 0:199) {
+      y=.454+k*(.247/200)
+      rect(.962,y,.012,.247/200+0.0003,pal[1+floor(k/199*255)])
+    }
+    for (v in c(0,2,4,6,8,10,11)) {
+      y=.454+(v/11)*.247
+      txt(as.character(v),.974,y,size=8.7)
+    }
+
+    txt("Temporal class",.028,.125,size=10.5,font=2)
+    legx <- c(.028,.325,.652)
+    leglab <- names(class_cols)
+    for (j in 1:3) {
+      rect(legx[j]+.008,.085,.016,.017,class_cols[j])
+      txt(leglab[j],legx[j]+.026,.085,size=9.6)
+    }
+  }
+  grDevices::pdf(file.path(out,"Figure_5B_Selected_21_Genes.pdf"),
+                 width=17.2,height=10.0,pointsize=14,useDingbats=FALSE)
+  tryCatch(draw(),finally=dev.off())
+  grDevices::png(file.path(out,"Figure_5B_Selected_21_Genes_600dpi.png"),
+                 width=17.2,height=10.0,units="in",res=600,pointsize=14,bg="white")
+  tryCatch(draw(),finally=dev.off())
+  message("Figure 5B saved to: ",out)
+  invisible(d)
+}
+run_figure_5B()
