@@ -1,0 +1,116 @@
+# Figure 5A | Temporal classes of the 1,202 Signature B genes
+# Input 1: Signature_B_1202_temporal_classes_ALL_GENES.csv
+# Input 2: Signature_B_1202_strict_LFC1_gene_audit.csv (for D0 contrasts)
+# The gene classes are read from the supplied classification; they are not redefined.
+# D0 is a pretreatment genotype contrast, not an LN-versus-HN contrast.
+# Lines show gene-wise median log2FC, with 25th-75th percentile bands.
+# Fine lines show individual genes. D1-D4 contrasts are under low nitrogen.
+
+run_figure_5A <- function() {
+  cat("Select the 1,202-gene temporal classification CSV.\n")
+  p1 <- file.choose()
+  cat("Select the strict LFC1 gene audit CSV (contains D0 contrasts).\n")
+  p2 <- file.choose()
+  cl <- read.csv(p1, check.names=FALSE, stringsAsFactors=FALSE)
+  au <- read.csv(p2, check.names=FALSE, stringsAsFactors=FALSE)
+  stopifnot("gene_id" %in% names(cl), "temporal_class" %in% names(cl),
+            all(c("gene_id","D0_O_B_log2FC","D0_F1_vs_B_log2FC") %in% names(au)))
+  if (anyDuplicated(cl$gene_id) || anyDuplicated(au$gene_id)) stop("Duplicate gene IDs.")
+  if (nrow(cl)!=1202) stop("Expected 1,202 classified genes; found ",nrow(cl))
+  classes <- c("Baseline (D0)", "Early persistent (D1-D4)",
+    "Early interrupted (D1, gap D2/D3)",
+    "Intermediate persistent (D2-D4)",
+    "Intermediate interrupted (D2 and D4)",
+    "Intermediate emerging (D3-D4)", "Late only (D4)")
+  expected <- c(6,686,110,134,64,38,164)
+  unknown <- setdiff(unique(cl$temporal_class), classes)
+  if (length(unknown)) stop("Unrecognized temporal classes: ", paste(unknown,collapse="; "))
+  counts <- table(factor(cl$temporal_class, levels=classes))
+  if (!all(as.integer(counts) == expected)) {
+    stop("Temporal-class membership does not match the seven original counts: ",
+         paste(as.integer(counts),collapse=", "))
+  }
+  k <- match(cl$gene_id,au$gene_id)
+  if (anyNA(k)) stop("Some classified genes are missing from the D0 audit.")
+  cl$D0_O_B_log2FC <- au$D0_O_B_log2FC[k]
+  cl$D0_F1_B_log2FC <- au$D0_F1_vs_B_log2FC[k]
+  for (day in 1:4) for (g in c("O","F1")) {
+    col <- paste0("D",day,"_",g,"_B_log2FC")
+    if (!col %in% names(cl)) stop("Missing contrast column: ",col)
+  }
+  out <- file.path(dirname(p1),"Figure_5A_Temporal_Classes")
+  dir.create(out,showWarnings=FALSE,recursive=TRUE)
+  med <- list()
+  blue <- "#176786"; orange <- "#CA8245"
+  titles <- c("Baseline (D0)","Early persistent (D1-D4)",
+              "Early intermittent (D1-D4)","Intermediate persistent (D2-D4)",
+              "Intermediate interrupted (D2-D4)","Late emerging (D3-D4)",
+              "Day 4 emerging (D4)")
+  for (j in seq_along(classes)) {
+    z <- cl[cl$temporal_class==classes[j],,drop=FALSE]
+    for (g in c("O","F1")) for (day in 0:4) {
+      col <- paste0("D",day,"_",g,"_B_log2FC")
+      v <- suppressWarnings(as.numeric(z[[col]])); v <- v[is.finite(v)]
+      med[[length(med)+1]] <- data.frame(
+        class=classes[j], label=titles[j], genotype=if(g=="O") "Oakley - Basalt" else "F1 - Basalt",
+        day=day,n=length(v),median=if(length(v)) median(v) else NA_real_,
+        q25=if(length(v)) unname(quantile(v,.25)) else NA_real_,
+        q75=if(length(v)) unname(quantile(v,.75)) else NA_real_)
+    }
+  }
+  summary <- do.call(rbind,med)
+  write.csv(summary,file.path(out,"Figure_5A_medians_IQR_source_values.csv"),row.names=FALSE)
+  write.csv(data.frame(temporal_class=classes,n=expected),
+            file.path(out,"Figure_5A_class_counts.csv"),row.names=FALSE)
+
+  draw <- function() {
+    op <- par(no.readonly=TRUE); on.exit(par(op))
+    layout(matrix(c(1,2,3,4,5,6,7,8),nrow=4,byrow=TRUE),
+           heights=c(1,1,1,1))
+    par(oma=c(0.3,1.1,2.8,0.2),mgp=c(1.9,.55,0),tcl=-.22,
+        family="sans",cex=1)
+    for (j in 1:8) {
+      par(mar=c(2.9,3.7,2.1,1.1))
+      if (j==8) {plot.new(); next}
+      z <- cl[cl$temporal_class==classes[j],,drop=FALSE]
+      plot(0,0,type="n",xlim=c(-.2,4.2),ylim=c(-2,13),
+           xaxt="n",yaxt="n",xlab="",ylab="",bty="l",xaxs="i",yaxs="i")
+      axis(1,at=0:4,labels=paste0("D",0:4),cex.axis=.9)
+      axis(2,at=c(0,4,8,12),las=1,cex.axis=.9)
+      abline(h=c(0,4,8,12),col="#EDF0F2",lwd=.7)
+      abline(h=1,col="#C8CDD0",lty=3,lwd=.8)
+      for (g in c("O","F1")) {
+        color <- if(g=="O") blue else orange
+        cols <- paste0("D",0:4,"_",g,"_B_log2FC")
+        vals <- as.matrix(data.frame(lapply(z[,cols,drop=FALSE],as.numeric)))
+        # Fine gene traces are deliberately faint to keep the median legible.
+        for (i in seq_len(nrow(vals))) {
+          lines(0:4,vals[i,],col=grDevices::adjustcolor(color,alpha.f=.055),lwd=.42)
+        }
+        sm <- summary[summary$class==classes[j] &
+          summary$genotype==if(g=="O") "Oakley - Basalt" else "F1 - Basalt",]
+        polygon(c(0:4,4:0),c(sm$q25,rev(sm$q75)),
+                col=grDevices::adjustcolor(color,alpha.f=.18),border=NA)
+        lines(sm$day,sm$median,col=color,lwd=1.7)
+        points(sm$day,sm$median,pch=16,cex=.42,col=color)
+      }
+      mtext(sprintf("(%s)  %s  |  n = %d",letters[j],titles[j],expected[j]),
+            side=3,adj=0,line=.5,cex=.84,font=2,col="#1D3044")
+      if (j %% 2==1) mtext("Genotype contrast (log2FC)",side=2,line=2.65,cex=.75)
+    }
+    # Header in outer margin, as in the supplied reference.
+    par(xpd=NA)
+    mtext("A",side=3,outer=TRUE,adj=0,line=1.45,font=2,cex=1.2)
+    mtext("──  (Oakley - Basalt)                 ──  (F1 - Basalt)",
+          side=3,outer=TRUE,adj=.55,line=1.45,cex=.83)
+  }
+  grDevices::pdf(file.path(out,"Figure_5A_Seven_Temporal_Classes.pdf"),
+                 width=12.6,height=10.8,pointsize=14,useDingbats=FALSE)
+  tryCatch(draw(),finally=dev.off())
+  grDevices::png(file.path(out,"Figure_5A_Seven_Temporal_Classes_600dpi.png"),
+                 width=12.6,height=10.8,units="in",res=600,pointsize=14,bg="white")
+  tryCatch(draw(),finally=dev.off())
+  message("Figure 5A saved to: ",out)
+  invisible(summary)
+}
+run_figure_5A()
